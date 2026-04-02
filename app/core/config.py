@@ -5,7 +5,7 @@ from pydantic_settings import (
 from functools import lru_cache
 from pydantic import (
     PostgresDsn,
-    RabbitmqDsn
+    AmqpDsn
 )
 from typing import (
     Literal,
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     debug: bool
     database_pool_size: int = 20
     database_url: Union[PostgresDsn, str]
-    rabbitmq_url: Union[RabbitmqDsn, str]
+    rabbitmq_url: Union[AmqpDsn, str]
     x_api_key: str
     api_v1_prefix: str = "/api/v1"
     log_level: str = "INFO"
