@@ -18,4 +18,4 @@ async def create_payment(
     db: AsyncSession = Depends(get_db),
 ):
     service = PaymentService(db)
-    return service.create_payment(data)
+    return await service.create_payment(data)

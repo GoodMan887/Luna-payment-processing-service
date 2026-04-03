@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.payment import Payment, PaymentStatus
+from app.models.outbox import Outbox
 from app.schemas.payment import PaymentCreate
 from sqlalchemy import select
 
@@ -25,8 +26,15 @@ class PaymentService:
             status=PaymentStatus.PENDING,
             payment_metadata=data.payment_metadata
         )
-
         self.db.add(new_payment)
+        await self.db.flush()
+
+        outbox_msg = Outbox(
+            payload={"payment_id": str(
+                new_payment.id), "amount": float(data.amount)},
+            event_type="payment_created"
+        )
+        self.db.add(outbox_msg)
 
         await self.db.commit()
         await self.db.refresh(new_payment)
