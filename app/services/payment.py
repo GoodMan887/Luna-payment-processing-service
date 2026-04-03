@@ -24,7 +24,8 @@ class PaymentService:
             description=data.description,
             idempotency_key=data.idempotency_key,
             status=PaymentStatus.PENDING,
-            payment_metadata=data.payment_metadata
+            payment_metadata=data.payment_metadata,
+            webhook_url=str(data.webhook_url) if data.webhook_url else None,
         )
         self.db.add(new_payment)
         await self.db.flush()
