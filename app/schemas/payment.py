@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from pydantic import BaseModel, Field, HttpUrl
 from decimal import Decimal
 from typing import Any, Optional
@@ -11,12 +12,27 @@ class PaymentCreate(BaseModel):
     currency: Currency
     description: Optional[str] = None
     payment_metadata: Optional[dict[str, Any]] = None
-    idempotency_key: str
     webhook_url: Optional[HttpUrl] = None
 
 
 class PaymentResponse(BaseModel):
-    id: uuid.UUID
+    payment_id: uuid.UUID = Field(validation_alias="id")
     status: PaymentStatus
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentDetail(BaseModel):
+    payment_id: uuid.UUID = Field(validation_alias="id")
+    amount: Decimal
+    currency: Currency
+    description: Optional[str] = None
+    payment_metadata: Optional[dict[str, Any]] = None
+    status: PaymentStatus
+    idempotency_key: str
+    webhook_url: Optional[str] = None
+    created_at: datetime
+    processed_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
