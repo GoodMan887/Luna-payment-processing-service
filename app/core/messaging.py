@@ -1,4 +1,10 @@
-import aio_pika  # pyright: ignore[reportMissingImports]
+from faststream.rabbit import RabbitBroker  # pyright: ignore[reportMissingImports]
+from faststream.rabbit.schemas import (  # pyright: ignore[reportMissingImports]
+    Channel,
+    ExchangeType,
+    RabbitExchange,
+    RabbitQueue,
+)
 
 from app.core.config import settings
 
@@ -9,6 +15,36 @@ PAYMENTS_NEW_QUEUE = "payments.new"
 PAYMENTS_RETRY_QUEUE = "payments.new.retry"
 PAYMENTS_DLQ_QUEUE = "payments.new.dlq"
 PAYMENTS_DLQ_ROUTING_KEY = "payments.new.dlq"
+
+# Схемы FastStream (обменники / очереди)
+RABBIT_PAYMENTS_MAIN_EXCHANGE = RabbitExchange(
+    PAYMENTS_EXCHANGE,
+    type=ExchangeType.DIRECT,
+    durable=True,
+)
+RABBIT_PAYMENTS_DLX_EXCHANGE = RabbitExchange(
+    PAYMENTS_DLX_EXCHANGE,
+    type=ExchangeType.DIRECT,
+    durable=True,
+)
+RABBIT_PAYMENTS_MAIN_QUEUE = RabbitQueue(
+    PAYMENTS_NEW_QUEUE,
+    durable=True,
+    arguments={
+        "x-dead-letter-exchange": PAYMENTS_DLX_EXCHANGE,
+        "x-dead-letter-routing-key": PAYMENTS_DLQ_ROUTING_KEY,
+    },
+    routing_key=PAYMENTS_NEW_QUEUE,
+)
+RABBIT_PAYMENTS_DLQ_QUEUE = RabbitQueue(PAYMENTS_DLQ_QUEUE, durable=True)
+RABBIT_PAYMENTS_RETRY_QUEUE = RabbitQueue(
+    PAYMENTS_RETRY_QUEUE,
+    durable=True,
+    arguments={
+        "x-dead-letter-exchange": PAYMENTS_EXCHANGE,
+        "x-dead-letter-routing-key": PAYMENTS_NEW_QUEUE,
+    },
+)
 
 # Ретраи на уровне потребления (не путать с ретраями webhook)
 CONSUMER_MAX_ATTEMPTS = 3
@@ -21,73 +57,50 @@ HEADER_FAILURE_REASON = "x-failure-reason"
 HEADER_DEAD_LETTER_FROM = "x-dead-letter-from"
 
 
-async def declare_payments_topology(
-    channel: aio_pika.abc.AbstractChannel,
-) -> tuple[aio_pika.Exchange, aio_pika.Exchange, aio_pika.Queue]:
+def payments_rabbit_broker(*, consumer_prefetch: int | None = 1) -> RabbitBroker:
+    """Брокер FastStream; prefetch задаётся только для воркера-потребителя."""
+    ch = (
+        Channel(prefetch_count=consumer_prefetch)
+        if consumer_prefetch is not None
+        else Channel()
+    )
+    return RabbitBroker(str(settings.rabbitmq_url), default_channel=ch)
+
+
+async def declare_payments_aux_infrastructure(broker: RabbitBroker) -> None:
     """
-    Объявляет обменники и очереди:
-    - payments.events: основной direct, в очередь payments.new
-    - payments.new: основная очередь; x-dead-letter → payments.dlx / payments.new.dlq
-      (сообщения с nack(requeue=False), истёкший TTL и т.п. попадут в DLQ брокером)
-    - payments.new.retry: без биндинга на вход; x-dead-letter обратно на payments.events
-      с rk payments.new — после истечения per-message expiration сообщение снова в основной очереди
-    - payments.new.dlq: очередь «мёртвых» сообщений, привязана к payments.dlx
+    Объявляет обменники и вспомогательные очереди до старта subscriber'а основной очереди:
+    - payments.events, payments.dlx
+    - payments.new.dlq + bind к payments.dlx
+    - payments.new.retry (перекладывание в payments.new по TTL через DLX)
+    Очередь payments.new объявляет и биндит FastStream при подписке.
     """
-    main_ex = await channel.declare_exchange(
-        PAYMENTS_EXCHANGE,
-        aio_pika.ExchangeType.DIRECT,
-        durable=True,
-    )
-    dlx_ex = await channel.declare_exchange(
-        PAYMENTS_DLX_EXCHANGE,
-        aio_pika.ExchangeType.DIRECT,
-        durable=True,
-    )
-
-    dlq_queue = await channel.declare_queue(PAYMENTS_DLQ_QUEUE, durable=True)
-    await dlq_queue.bind(dlx_ex, routing_key=PAYMENTS_DLQ_ROUTING_KEY)
-
-    await channel.declare_queue(
-        PAYMENTS_RETRY_QUEUE,
-        durable=True,
-        arguments={
-            "x-dead-letter-exchange": PAYMENTS_EXCHANGE,
-            "x-dead-letter-routing-key": PAYMENTS_NEW_QUEUE,
-        },
-    )
-
-    main_queue = await channel.declare_queue(
-        PAYMENTS_NEW_QUEUE,
-        durable=True,
-        arguments={
-            "x-dead-letter-exchange": PAYMENTS_DLX_EXCHANGE,
-            "x-dead-letter-routing-key": PAYMENTS_DLQ_ROUTING_KEY,
-        },
-    )
-    await main_queue.bind(main_ex, routing_key=PAYMENTS_NEW_QUEUE)
-
-    return main_ex, dlx_ex, main_queue
+    dlx = await broker.declare_exchange(RABBIT_PAYMENTS_DLX_EXCHANGE)
+    await broker.declare_exchange(RABBIT_PAYMENTS_MAIN_EXCHANGE)
+    dlq = await broker.declare_queue(RABBIT_PAYMENTS_DLQ_QUEUE)
+    await dlq.bind(dlx, routing_key=PAYMENTS_DLQ_ROUTING_KEY)
+    await broker.declare_queue(RABBIT_PAYMENTS_RETRY_QUEUE)
 
 
 async def publish_to_retry_queue(
-    channel: aio_pika.abc.AbstractChannel,
+    broker: RabbitBroker,
     body: bytes,
     *,
     next_attempt: int,
     delay_ms: int,
 ) -> None:
     """Публикация в retry-очередь с TTL; по истечении TTL брокер перекладывает сообщение в payments.new."""
-    msg = aio_pika.Message(
-        body=body,
-        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-        headers={HEADER_ATTEMPT: next_attempt},
+    await broker.publish(
+        body,
+        routing_key=PAYMENTS_RETRY_QUEUE,
+        persist=True,
         expiration=str(delay_ms),
+        headers={HEADER_ATTEMPT: next_attempt},
     )
-    await channel.default_exchange.publish(msg, routing_key=PAYMENTS_RETRY_QUEUE)
 
 
 async def publish_to_dlq(
-    dlx_exchange: aio_pika.Exchange,
+    broker: RabbitBroker,
     body: bytes,
     *,
     failure_reason: str,
@@ -103,24 +116,10 @@ async def publish_to_dlq(
     }
     if final_attempt is not None:
         headers["x-final-attempt"] = final_attempt
-    await dlx_exchange.publish(
-        aio_pika.Message(
-            body=body,
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-            headers=headers,
-        ),
+    await broker.publish(
+        body,
+        exchange=RABBIT_PAYMENTS_DLX_EXCHANGE,
         routing_key=PAYMENTS_DLQ_ROUTING_KEY,
+        persist=True,
+        headers=headers,
     )
-
-
-async def get_rabbit_channel(
-    *, publisher_confirms: bool = False
-) -> tuple[
-    aio_pika.RobustConnection,
-    aio_pika.abc.AbstractChannel,
-    aio_pika.Exchange,
-]:
-    connection = await aio_pika.connect_robust(str(settings.rabbitmq_url))
-    channel = await connection.channel(publisher_confirms=publisher_confirms)
-    main_ex, _, _ = await declare_payments_topology(channel)
-    return connection, channel, main_ex

@@ -2,11 +2,15 @@ import asyncio
 import json
 from typing import Any
 
-import aio_pika  # pyright: ignore[reportMissingImports]
 from sqlalchemy import func, select
 
 from app.core.database import async_session_maker
-from app.core.messaging import PAYMENTS_NEW_QUEUE, get_rabbit_channel
+from app.core.messaging import (
+    PAYMENTS_NEW_QUEUE,
+    RABBIT_PAYMENTS_MAIN_EXCHANGE,
+    declare_payments_aux_infrastructure,
+    payments_rabbit_broker,
+)
 from app.models.outbox import Outbox
 
 # Таймаут ожидания publisher ack от брокера (сек.); без успешной публикации строка outbox не помечается processed.
@@ -23,10 +27,10 @@ def _message_body_for_outbox(row: Outbox) -> dict[str, Any]:
 
 
 async def publish_outbox_messages() -> None:
-    connection, channel, main_exchange = await get_rabbit_channel(
-        publisher_confirms=True
-    )
-    async with connection:
+    broker = payments_rabbit_broker(consumer_prefetch=None)
+    await broker.connect()
+    await declare_payments_aux_infrastructure(broker)
+    try:
         while True:
             async with async_session_maker() as db:
                 async with db.begin():
@@ -41,18 +45,19 @@ async def publish_outbox_messages() -> None:
 
                     for row in rows:
                         envelope = _message_body_for_outbox(row)
-                        await main_exchange.publish(
-                            aio_pika.Message(
-                                body=json.dumps(envelope).encode("utf-8"),
-                                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                            ),
+                        await broker.publish(
+                            json.dumps(envelope).encode("utf-8"),
+                            exchange=RABBIT_PAYMENTS_MAIN_EXCHANGE,
                             routing_key=PAYMENTS_NEW_QUEUE,
+                            persist=True,
                             timeout=_PUBLISH_CONFIRM_TIMEOUT_SEC,
                         )
                         row.processed = True
                         row.processed_at = func.now()
 
             await asyncio.sleep(5)
+    finally:
+        await broker.stop()
 
 
 if __name__ == "__main__":

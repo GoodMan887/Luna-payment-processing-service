@@ -4,10 +4,14 @@ import logging
 import random
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Annotated
 from uuid import UUID
 
-import aio_pika
 import httpx
+from faststream import FastStream  # pyright: ignore[reportMissingImports]
+from faststream.middlewares import AckPolicy  # pyright: ignore[reportMissingImports]
+from faststream.params import NoCast  # pyright: ignore[reportMissingImports]
+from faststream.rabbit.annotations import RabbitMessage  # pyright: ignore[reportMissingImports]
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -17,7 +21,10 @@ from app.core.messaging import (
     CONSUMER_RETRY_BASE_DELAY_MS,
     HEADER_ATTEMPT,
     PAYMENTS_NEW_QUEUE,
-    declare_payments_topology,
+    RABBIT_PAYMENTS_MAIN_EXCHANGE,
+    RABBIT_PAYMENTS_MAIN_QUEUE,
+    declare_payments_aux_infrastructure,
+    payments_rabbit_broker,
     publish_to_dlq,
     publish_to_retry_queue,
 )
@@ -29,6 +36,9 @@ WEBHOOK_MAX_ATTEMPTS = 3
 # Экспоненциальная пауза между попытками webhook (ТЗ: 3 попытки): 1s, 2s
 WEBHOOK_RETRY_DELAYS_SEC = tuple(1.0 * (2**i)
                                  for i in range(WEBHOOK_MAX_ATTEMPTS - 1))
+
+broker = payments_rabbit_broker(consumer_prefetch=1)
+app = FastStream(broker)
 
 
 class InvalidPaymentMessage(Exception):
@@ -42,6 +52,12 @@ class PaymentHandleResult(StrEnum):
     SUCCESS = "success"
     INVALID_PAYLOAD = "invalid_payload"
     TRANSIENT_FAILURE = "transient_failure"
+
+
+@app.on_startup
+async def _declare_payments_aux() -> None:
+    await broker.connect()
+    await declare_payments_aux_infrastructure(broker)
 
 
 def _read_attempt(headers: dict | None) -> int:
@@ -156,66 +172,67 @@ async def _handle_payment_event(body: bytes) -> tuple[PaymentHandleResult, str |
     return PaymentHandleResult.SUCCESS, None
 
 
+@broker.subscriber(
+    RABBIT_PAYMENTS_MAIN_QUEUE,
+    RABBIT_PAYMENTS_MAIN_EXCHANGE,
+    ack_policy=AckPolicy.MANUAL,
+)
+async def process_payment_message(
+    body: Annotated[bytes, NoCast],
+    message: RabbitMessage,
+) -> None:
+    attempt = _read_attempt(message.headers)
+    try:
+        result, invalid_detail = await _handle_payment_event(body)
+    except Exception:
+        logger.exception(
+            "Unexpected error consuming message (attempt %s)", attempt
+        )
+        result, invalid_detail = PaymentHandleResult.TRANSIENT_FAILURE, None
+
+    try:
+        if result is PaymentHandleResult.INVALID_PAYLOAD:
+            await publish_to_dlq(
+                broker,
+                body,
+                failure_reason=invalid_detail or "invalid_payload",
+            )
+            await message.ack()
+            return
+
+        if result is PaymentHandleResult.SUCCESS:
+            await message.ack()
+            return
+
+        if attempt >= CONSUMER_MAX_ATTEMPTS:
+            await publish_to_dlq(
+                broker,
+                body,
+                failure_reason="max_retries_exceeded",
+                final_attempt=attempt,
+            )
+            await message.ack()
+            return
+
+        delay_ms = CONSUMER_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1))
+        await publish_to_retry_queue(
+            broker,
+            body,
+            next_attempt=attempt + 1,
+            delay_ms=delay_ms,
+        )
+        await message.ack()
+    except Exception:
+        logger.exception(
+            "Failed to ack/republish; возвращаем в очередь (nack requeue=True)"
+        )
+        await message.nack(requeue=True)
+
+
 async def main() -> None:
     logging.basicConfig(level=settings.log_level)
-    connection = await aio_pika.connect_robust(str(settings.rabbitmq_url))
-    async with connection:
-        channel = await connection.channel()
-        await channel.set_qos(prefetch_count=1)
-        _, dlx_exchange, main_queue = await declare_payments_topology(channel)
-
-        async def process_message(message: aio_pika.IncomingMessage) -> None:
-            attempt = _read_attempt(message.headers)
-            try:
-                result, invalid_detail = await _handle_payment_event(message.body)
-            except Exception:
-                logger.exception(
-                    "Unexpected error consuming message (attempt %s)", attempt
-                )
-                result, invalid_detail = PaymentHandleResult.TRANSIENT_FAILURE, None
-
-            try:
-                if result is PaymentHandleResult.INVALID_PAYLOAD:
-                    await publish_to_dlq(
-                        dlx_exchange,
-                        message.body,
-                        failure_reason=invalid_detail or "invalid_payload",
-                    )
-                    await message.ack()
-                    return
-
-                if result is PaymentHandleResult.SUCCESS:
-                    await message.ack()
-                    return
-
-                # TRANSIENT_FAILURE
-                if attempt >= CONSUMER_MAX_ATTEMPTS:
-                    await publish_to_dlq(
-                        dlx_exchange,
-                        message.body,
-                        failure_reason="max_retries_exceeded",
-                        final_attempt=attempt,
-                    )
-                    await message.ack()
-                    return
-
-                delay_ms = CONSUMER_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1))
-                await publish_to_retry_queue(
-                    channel,
-                    message.body,
-                    next_attempt=attempt + 1,
-                    delay_ms=delay_ms,
-                )
-                await message.ack()
-            except Exception:
-                logger.exception(
-                    "Failed to ack/republish; возвращаем в очередь (nack requeue=True)"
-                )
-                await message.nack(requeue=True)
-
-        logger.info("Waiting for messages on queue %s", PAYMENTS_NEW_QUEUE)
-        await main_queue.consume(process_message)
-        await asyncio.Future()
+    logger.info("Waiting for messages on queue %s", PAYMENTS_NEW_QUEUE)
+    await app.run()
 
 
 if __name__ == "__main__":
