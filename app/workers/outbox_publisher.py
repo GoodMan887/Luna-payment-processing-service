@@ -4,13 +4,13 @@ import json
 import aio_pika  # pyright: ignore[reportMissingImports]
 from sqlalchemy import func, select
 
-from app.core.messaging import PAYMENTS_NEW_QUEUE, get_rabbit_channel
 from app.core.database import async_session_maker
+from app.core.messaging import PAYMENTS_NEW_QUEUE, get_rabbit_channel
 from app.models.outbox import Outbox
 
 
 async def publish_outbox_messages() -> None:
-    connection, channel = await get_rabbit_channel()
+    connection, channel, main_exchange = await get_rabbit_channel()
     async with connection:
         while True:
             async with async_session_maker() as db:
@@ -20,7 +20,7 @@ async def publish_outbox_messages() -> None:
                 messages = result.scalars().all()
 
                 for msg in messages:
-                    await channel.default_exchange.publish(
+                    await main_exchange.publish(
                         aio_pika.Message(
                             body=json.dumps(msg.payload).encode("utf-8"),
                             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
