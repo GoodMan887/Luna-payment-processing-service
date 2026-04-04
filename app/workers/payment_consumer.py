@@ -25,8 +25,10 @@ from app.models.payment import Payment, PaymentStatus
 
 logger = logging.getLogger(__name__)
 
-WEBHOOK_MAX_ATTEMPTS = 5
-WEBHOOK_RETRY_DELAYS_SEC = (1.0, 2.0, 4.0, 8.0)
+WEBHOOK_MAX_ATTEMPTS = 3
+# Экспоненциальная пауза между попытками webhook (ТЗ: 3 попытки): 1s, 2s
+WEBHOOK_RETRY_DELAYS_SEC = tuple(1.0 * (2**i)
+                                 for i in range(WEBHOOK_MAX_ATTEMPTS - 1))
 
 
 class InvalidPaymentMessage(Exception):
