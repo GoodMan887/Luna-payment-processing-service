@@ -113,12 +113,14 @@ async def publish_to_dlq(
     )
 
 
-async def get_rabbit_channel() -> tuple[
+async def get_rabbit_channel(
+    *, publisher_confirms: bool = False
+) -> tuple[
     aio_pika.RobustConnection,
     aio_pika.abc.AbstractChannel,
     aio_pika.Exchange,
 ]:
     connection = await aio_pika.connect_robust(str(settings.rabbitmq_url))
-    channel = await connection.channel()
+    channel = await connection.channel(publisher_confirms=publisher_confirms)
     main_ex, _, _ = await declare_payments_topology(channel)
     return connection, channel, main_ex

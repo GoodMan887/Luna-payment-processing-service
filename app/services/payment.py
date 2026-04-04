@@ -37,6 +37,7 @@ class PaymentService:
             payload={
                 "payment_id": str(new_payment.id),
                 "amount": float(data.amount),
+                "event_version": 1,
             },
             event_type="payment_created",
         )
