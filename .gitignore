@@ -19,6 +19,7 @@ pip-delete-this-directory.txt
 
 *.database
 /docs
+.claude/
 
 .DS_Store
 thumbs.db

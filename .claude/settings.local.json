@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls -la .env*)",
-      "Bash(git check-ignore:*)"
-    ]
-  }
-}
