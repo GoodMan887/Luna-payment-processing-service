@@ -14,9 +14,11 @@ pip-delete-this-directory.txt
 *.swp
 *.swo
 
-.env
+.env*
+!.env.example
 
 *.database
+/docs
 
 .DS_Store
 thumbs.db
