@@ -10,7 +10,8 @@ from app.services.payment import PaymentService
 from app.core.config import settings
 
 
-router = APIRouter(prefix="payments")
+# Prefix is fully specified in main.py include_router call (/api/v1/payments)
+router = APIRouter()
 
 
 async def verify_api_key(
@@ -30,12 +31,12 @@ async def verify_api_key(
 )
 async def create_payment(
     data: PaymentCreate,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: Annotated[uuid.UUID, Header(alias="Idempotency-Key")],
     db: AsyncSession = Depends(get_db),
     _: None = Depends(verify_api_key),
 ):
     service = PaymentService(db)
-    return await service.create_payment(data, idempotency_key)
+    return await service.create_payment(data, str(idempotency_key))
 
 
 @router.get(

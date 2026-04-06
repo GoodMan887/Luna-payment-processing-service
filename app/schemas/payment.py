@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime
-from pydantic import BaseModel, Field, HttpUrl
 from decimal import Decimal
 from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+
 from app.models.payment import Currency, PaymentStatus
-from pydantic import ConfigDict
 
 
 class PaymentCreate(BaseModel):
@@ -20,7 +21,11 @@ class PaymentResponse(BaseModel):
     status: PaymentStatus
     created_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        populate_by_name=True,
+        use_enum_values=True,
+    )
 
 
 class PaymentDetail(BaseModel):
@@ -35,4 +40,8 @@ class PaymentDetail(BaseModel):
     created_at: datetime
     processed_at: Optional[datetime] = None
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        populate_by_name=True,
+        use_enum_values=True,
+    )
